@@ -1,0 +1,50 @@
+{
+    "name": "Steam Pixel Art",
+    "description": "Displays pixel art from the HuggingFace Pixilart dataset for your currently played Steam game.",
+    "version": "1.0.0",
+    "author": "Tim",
+    "entry": "plugin.py",
+    "settings_schema": [
+        {
+            "type": "header",
+            "label": "Steam Configuration"
+        },
+        {
+            "name": "steam_api_key",
+            "label": "Steam Web API Key",
+            "type": "password",
+            "info": "Your Steam Web API Key from https://steamcommunity.com/dev/apikey"
+        },
+        {
+            "name": "steam_id",
+            "label": "Steam ID64",
+            "type": "text",
+            "info": "Your 17-digit Steam ID (e.g. 76561197960287930)"
+        },
+        {
+            "type": "header",
+            "label": "Display Options"
+        },
+        {
+            "name": "min_likes",
+            "label": "Minimum Likes",
+            "type": "number",
+            "default": 10,
+            "info": "Minimum number of likes required for a pixel art to be displayed"
+        },
+        {
+            "name": "display_duration",
+            "label": "Display Duration (seconds)",
+            "type": "number",
+            "default": 10,
+            "info": "How long to display each artwork"
+        },
+        {
+            "name": "update_interval",
+            "label": "Steam Check Interval (seconds)",
+            "type": "number",
+            "default": 30,
+            "info": "How often to check Steam for game changes"
+        }
+    ]
+}
