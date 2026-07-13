@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+cache/
+Orcs Must Die! Deathtrap/
+*.bin

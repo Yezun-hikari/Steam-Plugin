@@ -1,6 +1,6 @@
 {
     "name": "Steam Pixel Art",
-    "description": "Displays pixel art from the HuggingFace Pixilart dataset for your currently played Steam game.",
+    "description": "Displays pixel art from the Divoom Gallery API for your currently played Steam game.",
     "version": "1.0.0",
     "author": "Tim",
     "entry": "plugin.py",

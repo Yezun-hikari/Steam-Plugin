@@ -1,0 +1,207 @@
+import os
+import sys
+import unittest
+import struct
+import math
+import zlib
+from unittest.mock import patch, MagicMock
+
+# Ensure we can import modules from the current directory
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from divoom_api import DivoomGalleryAPI
+
+# Mock app.plugin_api for plugin.py imports during tests if not available
+try:
+    import app.plugin_api
+except ImportError:
+    import sys
+    from types import ModuleType
+    app_mod = ModuleType("app")
+    plugin_api_mod = ModuleType("app.plugin_api")
+    class PixooPluginBase:
+        def __init__(self, config=None):
+            self.config = config or {}
+            self.running = False
+            self.setup()
+        def setup(self): pass
+        def get_pixoo_instance(self):
+            mock_pixoo = MagicMock()
+            return mock_pixoo
+        def get_playing_game(self): return None
+        def release_screen(self): pass
+    plugin_api_mod.PixooPluginBase = PixooPluginBase
+    app_mod.plugin_api = plugin_api_mod
+    sys.modules["app"] = app_mod
+    sys.modules["app.plugin_api"] = plugin_api_mod
+
+from plugin import SteamPlugin
+
+class TestDivoomComprehensive(unittest.TestCase):
+    def setUp(self):
+        self.api = DivoomGalleryAPI()
+
+    # ==========================================
+    # 1. KEYWORD EXTRACTION & STEMMING TESTS
+    # ==========================================
+    def test_extract_logical_keywords_orcs(self):
+        kw = self.api.extract_logical_keywords("Orcs Must Die! Deathtrap")
+        # Must include cleaned full title, main title, compound, and singularized 'Orc'
+        self.assertIn("Orcs Must Die Deathtrap", kw)
+        self.assertIn("Orcs Must Die", kw)
+        self.assertIn("Deathtrap", kw)
+        self.assertIn("Orcs Deathtrap", kw)
+        self.assertIn("Orcs", kw)
+        self.assertIn("Orc", kw) # Singular form derived from Orcs
+        # Must NOT include stop words alone
+        self.assertNotIn("Must", kw)
+        self.assertNotIn("Die", kw)
+
+    def test_extract_logical_keywords_meccha_chameleon(self):
+        kw = self.api.extract_logical_keywords("Meccha Camelion")
+        self.assertIn("Meccha Camelion", kw)
+        self.assertIn("Camelion", kw)
+        self.assertIn("Meccha", kw)
+        # Typo fallback rules
+        self.assertIn("chameleon", kw)
+        self.assertIn("mecha", kw)
+
+    def test_extract_logical_keywords_hollow_knight(self):
+        kw = self.api.extract_logical_keywords("Hollow Knight: Silksong")
+        self.assertIn("Hollow Knight Silksong", kw)
+        self.assertIn("Hollow Knight", kw)
+        self.assertIn("Silksong", kw)
+        self.assertIn("Hollow", kw)
+        self.assertIn("Knight", kw)
+
+    def test_extract_logical_keywords_empty_or_invalid(self):
+        self.assertEqual(self.api.extract_logical_keywords(""), [])
+        self.assertEqual(self.api.extract_logical_keywords(None), [])
+        self.assertEqual(self.api.extract_logical_keywords(12345), [])
+
+    # ==========================================
+    # 2. SMART GALLERY SEARCH BEHAVIOR TESTS
+    # ==========================================
+    @patch.object(DivoomGalleryAPI, 'search_gallery')
+    def test_smart_search_gallery_no_hot_fallback_when_zero_matches(self, mock_search):
+        # When all keyword searches across 64, 32, 16 return 0 hits, must return empty list []
+        mock_search.return_value = []
+        results = self.api.smart_search_gallery("Unknown Game Title 123", size=64)
+        self.assertEqual(results, [])
+
+    @patch.object(DivoomGalleryAPI, 'search_gallery')
+    def test_smart_search_gallery_size_fallback(self, mock_search):
+        # Suppose search for 'Orc' on size=64 yields 0 hits, but size=32 yields 1 hit
+        def side_effect(query, size=64, return_cnt=20):
+            if query.lower() == "orc" and size == 32:
+                return [{"FileId": "item_32_orc", "LikeCnt": 50, "FileName": "Orc Fighter"}]
+            return []
+        mock_search.side_effect = side_effect
+
+        results = self.api.smart_search_gallery("Orcs Must Die! Deathtrap", size=64)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["FileId"], "item_32_orc")
+        self.assertEqual(results[0]["pixel_size"], 2) # 64 / 32 = 2 scaling factor
+
+    # ==========================================
+    # 3. SPIL BINARY PARSING & DECODING TESTS
+    # ==========================================
+    def _create_synthetic_spil_bin(self, side=16, n_colors=4):
+        # Create a synthetic SPIL binary with known little-endian LSB index pixel pattern and subframes
+        palette_bytes = b"\xff\x00\x00\x00\xff\x00\x00\x00\xff\xff\xff\xff"[:n_colors*3]
+        bit_width = max(1, math.ceil(math.log2(n_colors)))
+        total_pixels = side * side
+
+        indices = [1 if (i % side) == (i // side) else 0 for i in range(total_pixels)]
+
+        # Pack indices into little-endian continuous bit stream for Frame 1
+        bit_stream = bytearray((total_pixels * bit_width + 7) // 8)
+        for i, idx in enumerate(indices):
+            for bit_idx in range(bit_width):
+                bit = (idx >> bit_idx) & 1
+                byte_pos = (i * bit_width + bit_idx) // 8
+                bit_in_byte = (i * bit_width + bit_idx) % 8
+                if bit:
+                    bit_stream[byte_pos] |= (1 << bit_in_byte)
+
+        # Build Frame 1 payload: speed=300ms, n_colors, palette, raw_bits
+        speed_bytes = struct.pack('<H', 300)
+        n_col_bytes = struct.pack('<H', n_colors)
+        frame_payload = len(bit_stream)
+        
+        # Two subframe headers to separate 3 frames (`raw[header_pos] == 0xAA` and `raw[next_pos] == 0xAA`)
+        subframe_header = b'\xaa\x88' + struct.pack('<H', frame_payload + 4) + struct.pack('<H', 300) + struct.pack('<H', 0)
+        full_payload = speed_bytes + n_col_bytes + palette_bytes + bytes(bit_stream) + subframe_header + bytes(bit_stream) + subframe_header + bytes(bit_stream)
+
+        header = b'\x00' * 17 + b'\xaa\xc1' + struct.pack('<H', len(full_payload))
+        return header + full_payload, indices
+
+    def test_parse_spil_frame_exact_dimensions(self):
+        for candidate_side in [8, 16, 32]:
+            data, expected_indices = self._create_synthetic_spil_bin(side=candidate_side, n_colors=4)
+            parsed = self.api._parse_spil_frame(data)
+            self.assertIsNotNone(parsed, f"Failed to parse synthetic SPIL for side={candidate_side}")
+            side, palette, indices = parsed
+            self.assertEqual(side, candidate_side)
+            self.assertEqual(len(palette), 4)
+            self.assertEqual(indices[: side*side], expected_indices)
+
+    def test_decode_image_and_png_bytes(self):
+        data, _ = self._create_synthetic_spil_bin(side=16, n_colors=4)
+        
+        # 1. Test decode_image (PIL behavior if installed vs None if not)
+        img = self.api.decode_image(data)
+        try:
+            import PIL
+            self.assertIsNotNone(img)
+            self.assertEqual(img.size, (16, 16))
+            self.assertEqual(img.getpixel((0, 0))[:3], (0, 255, 0))
+            self.assertEqual(img.getpixel((1, 0))[:3], (255, 0, 0))
+        except ImportError:
+            self.assertIsNone(img)
+
+        # 2. Test decode_to_png_bytes (pure Python fallback verification)
+        png_bytes = self.api.decode_to_png_bytes(data)
+        self.assertIsNotNone(png_bytes)
+        self.assertTrue(png_bytes.startswith(b'\x89PNG\r\n\x1a\n'))
+        self.assertIn(b'IHDR', png_bytes)
+        self.assertIn(b'IDAT', png_bytes)
+        self.assertIn(b'IEND', png_bytes)
+
+    def test_parse_spil_frame_corrupt_or_short(self):
+        self.assertIsNone(self.api._parse_spil_frame(b"short"))
+        self.assertIsNone(self.api._parse_spil_frame(b"\x00"*30))
+
+    # ==========================================
+    # 4. STEAM PLUGIN COMPREHENSIVE TESTS
+    # ==========================================
+    def test_plugin_setup_and_missing_credentials(self):
+        config = {"steam_api_key": "", "steam_id": ""}
+        plugin = SteamPlugin(config=config)
+        self.assertEqual(plugin.art_list, [])
+        self.assertIsNotNone(plugin.divoom_api)
+
+    @patch('urllib.request.urlopen')
+    def test_plugin_download_and_process_art_spil_binary(self, mock_urlopen):
+        data, _ = self._create_synthetic_spil_bin(side=32, n_colors=4)
+        mock_response = MagicMock()
+        mock_response.read.return_value = data
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        config = {"min_likes": 1}
+        plugin = SteamPlugin(config=config)
+        
+        art_item = {
+            "title": "Synthetic Art",
+            "url": "http://fake-cdn/image.bin",
+            "pixel_size": 2
+        }
+        
+        success = plugin.download_and_process_art(art_item)
+        self.assertTrue(success)
+        self.assertTrue(os.path.exists(plugin.current_art_path))
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

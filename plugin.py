@@ -1,10 +1,26 @@
 import os
 import time
 import logging
-import requests
+import urllib.request
 from io import BytesIO
-from PIL import Image
-from app.plugin_api import PixooPluginBase
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+try:
+    from app.plugin_api import PixooPluginBase
+except ImportError:
+    class PixooPluginBase:
+        def __init__(self, config=None):
+            self.config = config or {}
+            self.running = False
+            self.setup()
+        def setup(self): pass
+        def get_pixoo_instance(self): return None
+        def get_playing_game(self): return None
+        def release_screen(self): pass
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +42,9 @@ class SteamPlugin(PixooPluginBase):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.current_art_path = os.path.join(self.cache_dir, "current_art.png")
         
+        from divoom_api import DivoomGalleryAPI
+        self.divoom_api = DivoomGalleryAPI()
+        
         self.pixoo = self.get_pixoo_instance()
         
         if not self.steam_api_key or not self.steam_id:
@@ -36,12 +55,12 @@ class SteamPlugin(PixooPluginBase):
             return None
         
         try:
-            url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={self.steam_api_key}&steamids={self.steam_id}"
+            url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={self.steam_api_key}&steamids={self.steam_id}"
             res = requests.get(url, timeout=5).json()
             players = res.get("response", {}).get("players", [])
             if players:
                 player = players[0]
-                return player.get("gameextrainfo") # Returns the game name if playing
+                return player.get("gameextrainfo")  # Returns the game name if playing
         except Exception as e:
             logger.error(f"Error fetching Steam status: {e}")
         return None
@@ -50,58 +69,60 @@ class SteamPlugin(PixooPluginBase):
         logger.info(f"Searching pixel arts for game: {game_name}")
         artworks = []
         try:
-            # Query HuggingFace datasets server for Pixilart dataset
-            url = f"https://datasets-server.huggingface.co/search?dataset=bghira/free-to-use-pixelart&config=default&split=train&query={game_name}"
-            res = requests.get(url, timeout=10).json()
-            rows = res.get("rows", [])
-            
-            for r in rows:
-                item = r.get("row", {})
-                likes = item.get("likes_count", 0)
-                if likes >= self.min_likes:
-                    artworks.append({
-                        "title": item.get("title", "Unknown"),
-                        "likes": likes,
-                        "pixel_size": item.get("pixel_size", 1),
-                        "url": item.get("full_image_url")
-                    })
-            
-            # Sort by likes descending
-            artworks.sort(key=lambda x: x["likes"], reverse=True)
-            logger.info(f"Found {len(artworks)} artworks matching criteria.")
+            results = self.divoom_api.smart_search_gallery(game_name, size=64, min_likes=self.min_likes)
+            for item in results:
+                artworks.append({
+                    "title": item.get("FileName", game_name),
+                    "url": item.get("DownloadUrl"),
+                    "likes": item.get("LikeCnt", 0),
+                    "pixel_size": item.get("pixel_size", 1),
+                    "file_id": item.get("FileId")
+                })
         except Exception as e:
-            logger.error(f"Error fetching pixel arts: {e}")
+            logger.error(f"Error fetching from Divoom API: {e}")
         return artworks
 
     def download_and_process_art(self, art_item):
         try:
-            # Download image
-            res = requests.get(art_item["url"], timeout=10)
-            res.raise_for_status()
-            img = Image.open(BytesIO(res.content)).convert("RGBA")
+            # Download image or Divoom SPIL binary using standard library
+            req = urllib.request.Request(art_item["url"], headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                content = response.read()
             
-            pixel_size = max(1, int(art_item.get("pixel_size", 1)))
-            
-            # Downscale by exactly the pixel_size to extract the pure 1:1 original pixel art
-            # Nearest neighbor scaling prevents ANY blur or pixel mush
-            if pixel_size > 1:
-                new_width = max(1, img.width // pixel_size)
-                new_height = max(1, img.height // pixel_size)
-                img = img.resize((new_width, new_height), Image.Resampling.NEAREST)
-            
-            # Create a 64x64 black canvas
-            canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
-            
-            # Crop or pad the image to fit 64x64
-            # We center the 1:1 pixel art on the canvas
-            offset_x = (64 - img.width) // 2
-            offset_y = (64 - img.height) // 2
-            
-            canvas.paste(img, (offset_x, offset_y), img)
-            
-            # Convert to RGB and save
-            canvas.convert("RGB").save(self.current_art_path)
-            return True
+            if Image is not None:
+                # Use divoom_api to decode both standard PNG/GIFs and Divoom SPIL binary animations into PIL Image
+                img = self.divoom_api.decode_image(content)
+                if not img:
+                    raise ValueError("Could not decode image or SPIL binary format from Divoom CDN")
+                
+                pixel_size = max(1, int(art_item.get("pixel_size", 1)))
+                
+                # Downscale by exactly the pixel_size to extract the pure 1:1 original pixel art
+                # Nearest neighbor scaling prevents ANY blur or pixel mush
+                if pixel_size > 1:
+                    new_width = max(1, img.width // pixel_size)
+                    new_height = max(1, img.height // pixel_size)
+                    img = img.resize((new_width, new_height), Image.Resampling.NEAREST)
+                
+                # Create a 64x64 black canvas
+                canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
+                
+                # Crop or pad the image to fit 64x64
+                offset_x = (64 - img.width) // 2
+                offset_y = (64 - img.height) // 2
+                canvas.paste(img, (offset_x, offset_y), img)
+                
+                # Convert to RGB and save
+                canvas.convert("RGB").save(self.current_art_path)
+                return True
+            else:
+                # Pure Python fallback (no PIL installed): decode direct to PNG bytes and save
+                png_bytes = self.divoom_api.decode_to_png_bytes(content)
+                if not png_bytes:
+                    raise ValueError("Could not decode raw Divoom content to PNG bytes via pure Python fallback")
+                with open(self.current_art_path, 'wb') as f:
+                    f.write(png_bytes)
+                return True
         except Exception as e:
             logger.error(f"Error processing art '{art_item['title']}': {e}")
             return False
