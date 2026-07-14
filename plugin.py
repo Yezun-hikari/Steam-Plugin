@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import urllib.request
+import json
 from io import BytesIO
 
 # Ensure current plugin directory is in sys.path so sibling modules like divoom_api can be imported
@@ -66,7 +67,9 @@ class SteamPlugin(PixooPluginBase):
         
         try:
             url = f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={self.steam_api_key}&steamids={self.steam_id}"
-            res = requests.get(url, timeout=5).json()
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                res = json.loads(response.read().decode('utf-8'))
             players = res.get("response", {}).get("players", [])
             if players:
                 player = players[0]

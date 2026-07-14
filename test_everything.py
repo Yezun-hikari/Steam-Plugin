@@ -183,6 +183,29 @@ class TestDivoomComprehensive(unittest.TestCase):
         self.assertIsNotNone(plugin.divoom_api)
 
     @patch('urllib.request.urlopen')
+    def test_get_playing_game_success(self, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "response": {
+                "players": [
+                    {"gameextrainfo": "Elden Ring"}
+                ]
+            }
+        }).encode('utf-8')
+        mock_response.__enter__.return_value = mock_response
+        mock_urlopen.return_value = mock_response
+
+        plugin = SteamPlugin(config={"steam_api_key": "fake_key", "steam_id": "fake_id"})
+        self.assertEqual(plugin.get_playing_game(), "Elden Ring")
+
+    @patch('urllib.request.urlopen')
+    def test_get_playing_game_error(self, mock_urlopen):
+        mock_urlopen.side_effect = Exception("Network timeout")
+        plugin = SteamPlugin(config={"steam_api_key": "fake_key", "steam_id": "fake_id"})
+        self.assertIsNone(plugin.get_playing_game())
+
+
+    @patch('urllib.request.urlopen')
     def test_plugin_download_and_process_art_spil_binary(self, mock_urlopen):
         data, _ = self._create_synthetic_spil_bin(side=32, n_colors=4)
         mock_response = MagicMock()
