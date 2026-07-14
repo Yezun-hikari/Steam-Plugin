@@ -176,6 +176,26 @@ class TestDivoomComprehensive(unittest.TestCase):
         self.assertIsNone(self.api._parse_spil_frame(b"short"))
         self.assertIsNone(self.api._parse_spil_frame(b"\x00"*30))
 
+    def test_parse_spil_frame_advanced_fallbacks(self):
+        data, expected_indices = self._create_synthetic_spil_bin(side=16, n_colors=4)
+        
+        # 1. Test SPIL frame with garbage prefix putting 0xAA at arbitrary offset (e.g. pos=45)
+        shifted_data = b"\x00\x01\x02\x03" * 11 + data[data.find(b'\xaa'):]
+        parsed = self.api._parse_spil_frame(shifted_data)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], 16)
+        
+        # 2. Test zlib compressed SPIL binary via decode_image
+        import zlib
+        compressed = zlib.compress(data)
+        img = self.api.decode_image(compressed)
+        try:
+            import PIL
+            self.assertIsNotNone(img)
+            self.assertEqual(img.size, (16, 16))
+        except ImportError:
+            pass
+
     # ==========================================
     # 4. STEAM PLUGIN COMPREHENSIVE TESTS
     # ==========================================

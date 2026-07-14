@@ -256,20 +256,24 @@ class DivoomGalleryAPI:
         import io
         import struct
 
-        if not content or len(content) < 100 or content[0] != 0x1a:
+        if not content or len(content) < 30:
+            return None
+
+        pos = content.find(b'\x1a')
+        if pos == -1 or pos > 64:
             return None
 
         try:
-            fp = io.BytesIO(content[1:])
+            fp = io.BytesIO(content[pos + 1 :])
             total_frames, speed, row_count, column_count = struct.unpack('>BHBB', fp.read(5))
             if row_count <= 0 or column_count <= 0 or total_frames <= 0 or total_frames > 1000:
                 return None
 
             size = struct.unpack('>I', fp.read(4))[0]
-            if size > len(content) or size <= 0:
+            if size <= 0:
                 return None
             data = fp.read(size)
-            if len(data) < 10 or data[5] != 0x0C:
+            if not data or len(data) < 10:
                 return None
 
             uVar13 = data[6]
@@ -361,90 +365,123 @@ class DivoomGalleryAPI:
         import struct
         import math
 
-        if len(content) < 25:
+        if len(content) < 15:
             return None
 
-        # Find valid block header (0xAA usually at pos=17)
-        pos = -1
-        for candidate in [17, 0]:
-            if candidate + 10 <= len(content) and content[candidate] == 0xaa:
-                pos = candidate
-                break
-        if pos == -1:
-            for i in range(min(100, len(content) - 10)):
-                if content[i] == 0xaa:
-                    pos = i
-                    break
-        if pos == -1:
+        # Collect candidate payloads across all 0xAA block headers and raw fallback
+        candidates = []
+        for pos in range(min(1024, len(content) - 10)):
+            if content[pos] != 0xaa:
+                continue
+            
+            try:
+                hdr_len = struct.unpack('<H', content[pos+2:pos+4])[0]
+            except Exception:
+                hdr_len = 0
+                
+            payload_candidates = []
+            if 10 <= hdr_len <= len(content) - (pos + 4) + 64:
+                payload_candidates.append(content[pos+4 : min(len(content), pos + 4 + hdr_len)])
+            if len(content) - (pos + 4) >= 10:
+                payload_candidates.append(content[pos+4 :])
+                
+            for payload in payload_candidates:
+                color_counts = []
+                if len(payload) >= 4:
+                    try:
+                        color_counts.append((struct.unpack('<H', payload[2:4])[0], 4))
+                        color_counts.append((struct.unpack('<H', payload[0:2])[0], 2))
+                    except Exception:
+                        pass
+                if len(payload) >= 3:
+                    color_counts.append((payload[2], 3))
+                    color_counts.append((payload[0], 1))
+                    
+                for n_colors, color_offset in color_counts:
+                    if 1 <= n_colors <= 256 and color_offset + n_colors * 3 <= len(payload):
+                        pal = []
+                        for i in range(n_colors):
+                            r, g, b = payload[color_offset + i*3 : color_offset + (i+1)*3]
+                            pal.append((r, g, b, 255))
+                        raw = payload[color_offset + n_colors * 3 :]
+                        if len(raw) >= 8:
+                            candidates.append((n_colors, pal, raw))
+
+        # Raw SPIL fallback (if no 0xAA header or if 0xAA failed)
+        for color_offset in [2, 0, 4]:
+            if len(content) >= color_offset + 2:
+                try:
+                    n_col = struct.unpack('<H', content[color_offset : color_offset+2])[0]
+                    if 1 <= n_col <= 256 and color_offset + 2 + n_col * 3 <= len(content):
+                        pal = []
+                        for i in range(n_col):
+                            r, g, b = content[color_offset + 2 + i*3 : color_offset + 2 + (i+1)*3]
+                            pal.append((r, g, b, 255))
+                        raw = content[color_offset + 2 + n_col * 3 :]
+                        if len(raw) >= 8:
+                            candidates.append((n_col, pal, raw))
+                except Exception:
+                    pass
+
+        if not candidates:
             return None
 
-        length = struct.unpack('<H', content[pos+2:pos+4])[0]
-        if pos + 4 + length > len(content) or length < 10:
-            return None
+        # Try every candidate until we get a valid frame match
+        for n_colors, palette, raw in candidates:
+            bit_width = max(1, math.ceil(math.log2(n_colors)))
+            if not raw:
+                continue
 
-        payload = content[pos+4 : pos+4+length]
-        n_colors = struct.unpack('<H', payload[2:4])[0]
-        if n_colors <= 0 or n_colors > 256 or (4 + n_colors * 3) > len(payload):
-            return None
+            # Unpack continuous little-endian bit stream
+            bits = []
+            for b in raw[: 4096 * bit_width // 8 + 10]:
+                for bit_idx in range(8):
+                    bits.append((b >> bit_idx) & 1)
 
-        palette = []
-        for i in range(n_colors):
-            r, g, b = payload[4 + i*3 : 4 + (i+1)*3]
-            palette.append((r, g, b, 255))
-
-        bit_width = max(1, math.ceil(math.log2(n_colors)))
-        raw = payload[4 + n_colors*3 :]
-        if not raw:
-            return None
-
-        # Unpack continuous little-endian bit stream
-        bits = []
-        for b in raw[: 4096 * bit_width // 8 + 10]:
-            for bit_idx in range(8):
-                bits.append((b >> bit_idx) & 1)
-
-        # Detect exact side length (64, 32, 16, 8)
-        detected_sz = None
-        for candidate_sz in [64, 32, 16, 8]:
-            frame_payload = candidate_sz * candidate_sz * bit_width // 8
-            header_pos = frame_payload
-            if header_pos + 8 <= len(raw) and raw[header_pos] == 0xaa:
-                next_pos = header_pos + 8 + frame_payload
-                if next_pos + 8 <= len(raw) and raw[next_pos] == 0xaa:
-                    detected_sz = candidate_sz
-                    break
-
-        if not detected_sz:
+            # Detect exact side length (64, 32, 16, 8)
+            detected_sz = None
             for candidate_sz in [64, 32, 16, 8]:
-                expected_raw_len = candidate_sz * candidate_sz * bit_width // 8
-                if expected_raw_len <= len(raw) <= expected_raw_len + 16:
-                    detected_sz = candidate_sz
-                    break
+                frame_payload = candidate_sz * candidate_sz * bit_width // 8
+                header_pos = frame_payload
+                if header_pos + 8 <= len(raw) and raw[header_pos] == 0xaa:
+                    next_pos = header_pos + 8 + frame_payload
+                    if next_pos + 8 <= len(raw) and raw[next_pos] == 0xaa:
+                        detected_sz = candidate_sz
+                        break
 
-        if not detected_sz:
-            best_sz = 16
-            best_score = 999.0
-            for sz in [64, 32, 16, 8]:
-                if sz * sz * bit_width // 8 > len(raw):
-                    continue
-                ind = [sum(bits[i*bit_width + j] * (1 << j) for j in range(bit_width)) for i in range(sz * sz)]
-                rep = sum(1 for y in range(sz) if ind[y*sz : y*sz + sz//2] == ind[y*sz + sz//2 : y*sz + sz])
-                if rep >= sz * 0.8:
-                    continue
-                diff_h = sum(1 for y in range(sz) for x in range(sz - 1) if ind[y*sz + x] != ind[y*sz + x + 1]) / max(1, sz * (sz - 1))
-                diff_v = sum(1 for y in range(sz - 1) for x in range(sz) if ind[y*sz + x] != ind[(y + 1)*sz + x]) / max(1, sz * (sz - 1))
-                score = diff_h + diff_v
-                if score < best_score:
-                    best_score = score
-                    best_sz = sz
-            detected_sz = best_sz
+            if not detected_sz:
+                for candidate_sz in [64, 32, 16, 8]:
+                    expected_raw_len = candidate_sz * candidate_sz * bit_width // 8
+                    if expected_raw_len <= len(raw) <= expected_raw_len + 16:
+                        detected_sz = candidate_sz
+                        break
 
-        indices = []
-        for i in range(detected_sz * detected_sz):
-            chunk = bits[i*bit_width : (i+1)*bit_width]
-            indices.append(sum(bit * (1 << j) for j, bit in enumerate(chunk)))
+            if not detected_sz:
+                best_sz = 16
+                best_score = 999.0
+                for sz in [64, 32, 16, 8]:
+                    if sz * sz * bit_width // 8 > len(raw):
+                        continue
+                    ind = [sum(bits[i*bit_width + j] * (1 << j) for j in range(bit_width)) for i in range(sz * sz)]
+                    rep = sum(1 for y in range(sz) if ind[y*sz : y*sz + sz//2] == ind[y*sz + sz//2 : y*sz + sz])
+                    if rep >= sz * 0.8:
+                        continue
+                    diff_h = sum(1 for y in range(sz) for x in range(sz - 1) if ind[y*sz + x] != ind[y*sz + x + 1]) / max(1, sz * (sz - 1))
+                    diff_v = sum(1 for y in range(sz - 1) for x in range(sz) if ind[y*sz + x] != ind[(y + 1)*sz + x]) / max(1, sz * (sz - 1))
+                    score = diff_h + diff_v
+                    if score < best_score:
+                        best_score = score
+                        best_sz = sz
+                detected_sz = best_sz
 
-        return detected_sz, palette, indices
+            indices = []
+            for i in range(detected_sz * detected_sz):
+                chunk = bits[i*bit_width : (i+1)*bit_width]
+                indices.append(sum(bit * (1 << j) for j, bit in enumerate(chunk)))
+
+            return detected_sz, palette, indices
+
+        return None
 
     def decode_image(self, content):
         """
@@ -461,6 +498,22 @@ class DivoomGalleryAPI:
 
         try:
             from PIL import Image
+            import zlib
+            import gzip
+            
+            # Check decompression fallback if standard direct image opening failed
+            for decompressor in [lambda c: zlib.decompress(c), lambda c: zlib.decompress(c, -zlib.MAX_WBITS), lambda c: gzip.decompress(c)]:
+                try:
+                    decomp = decompressor(content)
+                    if decomp:
+                        try:
+                            return Image.open(BytesIO(decomp)).convert("RGBA")
+                        except Exception:
+                            content = decomp
+                            break
+                except Exception:
+                    pass
+
             parsed = self._parse_divoom_v3_container(content) or self._parse_spil_frame(content)
             if not parsed:
                 return None
