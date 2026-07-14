@@ -28,13 +28,52 @@ class DivoomGalleryAPI:
         128: 16
     }
 
-    def __init__(self, timeout=10):
-        # Setting up a permissive SSL context if needed
+    def __init__(self, email=None, password=None, token=None, user_id=None, timeout=10, config=None):
+        import os
         self.ctx = ssl.create_default_context()
         self.ctx.check_hostname = False
         self.ctx.verify_mode = ssl.CERT_NONE
 
         self.timeout = timeout
+        self.config = config or {}
+
+        self.email = email or self.config.get("divoom_email") or os.environ.get("DIVOOM_EMAIL", "")
+        self.password = password or self.config.get("divoom_password") or os.environ.get("DIVOOM_PASSWORD", "")
+        self.token = token or self.config.get("divoom_token") or os.environ.get("DIVOOM_TOKEN", "")
+        self.user_id = user_id or self.config.get("divoom_user_id") or os.environ.get("DIVOOM_USER_ID", 0)
+
+        # Automatically log in if email/password provided and token is missing
+        if self.email and self.password and not self.token:
+            self.login()
+
+    def login(self, email=None, password=None):
+        """
+        Authenticates with Divoom Cloud via /UserLogin to obtain an access Token and UserId.
+        Required for tag and keyword search endpoints.
+        """
+        if email:
+            self.email = email
+        if password:
+            self.password = password
+
+        if not self.email or not self.password:
+            logger.warning("No email/password provided for Divoom Cloud login.")
+            return False
+
+        data = {
+            "Email": self.email,
+            "Password": hashlib.md5(self.password.encode('utf-8')).hexdigest()
+        }
+        response = self._post("UserLogin", data)
+        if response and response.get("ReturnCode") == 0:
+            self.token = str(response.get("Token", ""))
+            self.user_id = int(response.get("UserId", 0))
+            logger.info(f"Successfully logged in to Divoom Cloud (UserId={self.user_id})")
+            return True
+        else:
+            msg = response.get("ReturnMessage") if response else "Unknown error"
+            logger.error(f"Divoom Cloud login failed: {msg}")
+            return False
 
     def _post(self, endpoint, data):
         url = f"{self.BASE_URL}/{endpoint}"
@@ -61,23 +100,28 @@ class DivoomGalleryAPI:
             logger.error(f"Request failed to {endpoint}: {e}")
         return None
 
-    def search_gallery(self, keyword, size=64, return_cnt=20, base_cnt=0):
+    def search_gallery(self, keyword, size=64, return_cnt=50, base_cnt=0):
         """
-        Searches the Divoom gallery for a specific keyword and size.
+        Searches the Divoom gallery using the modern Tag/GetTagGalleryListV2 endpoint.
+        Requires an authenticated Token and UserId (obtained via login).
         """
         if size not in self.SIZE_MAP:
             raise ValueError(f"Invalid size '{size}'. Allowed sizes are: {list(self.SIZE_MAP.keys())}")
 
-        file_size_id = self.SIZE_MAP[size]
+        if not self.token and self.email and self.password:
+            self.login()
 
         data = {
-            "KeyWord": keyword,
+            "TagName": keyword,
+            "StartNum": 1 + base_cnt,
+            "EndNum": return_cnt + base_cnt,
             "ReturnCnt": return_cnt,
             "BaseCnt": base_cnt,
-            "FileSize": file_size_id
+            "Token": str(self.token or ""),
+            "UserId": int(self.user_id or 0)
         }
 
-        response = self._post("SearchGalleryV2", data)
+        response = self._post("Tag/GetTagGalleryListV2", data)
 
         results = []
         if response and response.get("ReturnCode") == 0:
@@ -87,6 +131,8 @@ class DivoomGalleryAPI:
                 if file_id:
                     item["DownloadUrl"] = f"{self.FILE_URL}{file_id}"
                 results.append(item)
+        elif response and response.get("ReturnCode") == 11:
+            logger.warning(f"Search failed for tag '{keyword}': Token mismatch or unauthenticated (ReturnCode=11). Please provide valid login credentials.")
 
         return results
 
@@ -148,12 +194,12 @@ class DivoomGalleryAPI:
 
         return candidates
 
-    def smart_search_gallery(self, game_name, size=64, min_likes=1, return_cnt=20):
+    def smart_search_gallery(self, game_name, size=64, min_likes=1, return_cnt=100):
         """
-        Intelligent search heuristic for games:
-        1. Analyzes game title using extract_logical_keywords (stripping stop words, splitting subtitles, singularizing plurals like Orcs -> Orc).
-        2. Searches Divoom Gallery across requested size and fallbacks (32, 16) for every candidate keyword.
-        3. Only returns true semantic keyword matches rather than unrelated random hot files.
+        Intelligent search heuristic for games using Divoom Tag Gallery:
+        1. Analyzes game title using extract_logical_keywords.
+        2. Queries Tag/GetTagGalleryListV2 across candidate keywords.
+        3. Filters by exact requested size and like count, with automatic fallbacks to 32x32 and 16x16 if needed.
         """
         results = []
         seen_ids = set()
@@ -174,157 +220,138 @@ class DivoomGalleryAPI:
         candidates = self.extract_logical_keywords(game_name)
         logger.info(f"Analyzed logical keywords for '{game_name}': {candidates}")
 
-        # Tier 1: Direct Divoom Cloud Search across sizes 64, 32, and 16
         for query in candidates:
-            logger.info(f"Searching Divoom Gallery (size={size}) with keyword: '{query}'")
-            res = self.search_gallery(query, size=size, return_cnt=return_cnt)
-            add_results(res, fallback_pixel_size=1)
+            logger.info(f"Searching Divoom Tag Gallery with tag: '{query}'")
+            res = self.search_gallery(query, size=size, return_cnt=max(50, return_cnt * 2))
+            if not res:
+                continue
 
-            if not res and size != 32:
-                logger.info(f"No {size}x{size} matches for '{query}', checking 32x32...")
-                res32 = self.search_gallery(query, size=32, return_cnt=return_cnt)
-                add_results(res32, fallback_pixel_size=2 if size == 64 else 1)
-                if not res32 and size != 16:
-                    logger.info(f"No 32x32 matches for '{query}', checking 16x16...")
-                    res16 = self.search_gallery(query, size=16, return_cnt=return_cnt)
-                    add_results(res16, fallback_pixel_size=4 if size == 64 else 2)
+            # Check exact requested size matches (e.g. FileSize == 4 for 64x64)
+            target_file_size = self.SIZE_MAP[size]
+            exact_matches = [x for x in res if x.get("FileSize") == target_file_size]
+            add_results(exact_matches, fallback_pixel_size=1)
 
-            if len(results) >= 3:
+            # If not enough exact matches, add fallback sizes from the same tag search
+            if len(results) < return_cnt and size != 32:
+                matches_32 = [x for x in res if x.get("FileSize") == self.SIZE_MAP[32]]
+                add_results(matches_32, fallback_pixel_size=2 if size == 64 else 1)
+
+            if len(results) < return_cnt and size != 16:
+                matches_16 = [x for x in res if x.get("FileSize") == self.SIZE_MAP[16]]
+                add_results(matches_16, fallback_pixel_size=4 if size == 64 else 2)
+
+            if len(results) >= return_cnt:
                 break
 
-        # Tier 2: Hybrid Keyword Matching against open Divoom Curated Catalogs (RecommendList & HotFiles)
         if not results:
-            logger.info(f"Tier 1 yielded 0 direct matches for '{game_name}'. Checking Tier 2: Divoom Curated Catalogs...")
-            curated_items = []
-            try:
-                curated_items.extend(self.get_recommend_list(return_cnt=50))
-                curated_items.extend(self.get_hot_files(size=64, return_cnt=50))
-                curated_items.extend(self.get_hot_files(size=32, return_cnt=50))
-            except Exception as e:
-                logger.error(f"Error fetching curated catalogs in Tier 2: {e}")
+            logger.warning(f"Tag search for '{game_name}' (tags: {candidates}) yielded 0 matching items.")
 
-            # Match items whose title/filename contains any of our candidate strings or token words
-            tokens = set()
-            for cand in candidates:
-                tokens.add(cand.lower())
-                for word in cand.lower().split():
-                    if len(word) >= 3:
-                        tokens.add(word)
+        return results[:return_cnt]
 
-            for item in curated_items:
-                fname = str(item.get("FileName", "")).lower()
-                if any(t in fname for t in tokens):
-                    if item.get("LikeCnt", 0) >= min_likes:
-                        add_results([item], fallback_pixel_size=1 if item.get("FileSize") == 4 else (2 if item.get("FileSize") == 2 else 4))
-                        if len(results) >= return_cnt:
-                            break
+    def _parse_divoom_v3_container(self, content):
+        """
+        Parses Divoom Cloud v3 container binary content (.bin) (e.g. 0x1a 64x64 multi-frame format)
+        and returns (side, palette, indices) for the first frame.
+        """
+        import io
+        import struct
 
-        # Tier 3: Supplementary Public Dataset Search (e.g. HuggingFace free-to-use-pixelart dataset)
-        if not results:
-            logger.info(f"Tier 2 yielded 0 catalog matches for '{game_name}'. Checking Tier 3: Public Tagged Dataset...")
-            for query in candidates:
+        if not content or len(content) < 100 or content[0] != 0x1a:
+            return None
+
+        try:
+            fp = io.BytesIO(content[1:])
+            total_frames, speed, row_count, column_count = struct.unpack('>BHBB', fp.read(5))
+            if row_count <= 0 or column_count <= 0 or total_frames <= 0 or total_frames > 1000:
+                return None
+
+            size = struct.unpack('>I', fp.read(4))[0]
+            if size > len(content) or size <= 0:
+                return None
+            data = fp.read(size)
+            if len(data) < 10 or data[5] != 0x0C:
+                return None
+
+            uVar13 = data[6]
+            iVar11 = uVar13 * 3
+            if uVar13 == 0:
+                bVar9 = 8
+                iVar11 = 768
+            else:
+                bVar9 = 0xFF
+                bVar15 = 1
+                while True:
+                    if (uVar13 & 1) != 0:
+                        bVar18 = bVar9 == 0xFF
+                        bVar9 = bVar15
+                        if bVar18:
+                            bVar9 = bVar15 - 1
+                    uVar14 = uVar13 & 0xFFFE
+                    bVar15 = bVar15 + 1
+                    uVar13 = uVar14 >> 1
+                    if uVar14 == 0:
+                        break
+
+            pixel_idx = 0
+            pos = (iVar11 + 8) & 0xFFFF
+            output = [0] * 12288
+
+            while True:
+                if not data[pos:]:
+                    color_index = -1
+                else:
+                    uVar2 = bVar9 * pixel_idx & 7
+                    uVar4 = bVar9 * pixel_idx * 65536 >> 0x13
+                    if bVar9 < 9:
+                        uVar3 = bVar9 + uVar2
+                        if uVar3 < 9:
+                            uVar6 = data[pos + uVar4] << (8 - uVar3 & 0xFF) & 0xFF
+                            uVar6 >>= uVar2 + (8 - uVar3) & 0xFF
+                        else:
+                            uVar6 = data[pos + uVar4 + 1] << (0x10 - uVar3 & 0xFF) & 0xFF
+                            uVar6 >>= 0x10 - uVar3 & 0xFF
+                            uVar6 &= 0xFFFF
+                            uVar6 <<= 8 - uVar2 & 0xFF
+                            uVar6 |= data[pos + uVar4] >> uVar2
+                    else:
+                        color_index = -1
+                        uVar6 = -1
+                    if uVar6 != -1:
+                        color_index = uVar6
+
+                target_pos = pixel_idx * 3
+                if color_index == -1:
+                    output[target_pos] = output[target_pos + 1] = output[target_pos + 2] = 0
+                else:
+                    color_pos = 8 + color_index * 3
+                    if color_pos + 2 < len(data):
+                        output[target_pos] = data[color_pos]
+                        output[target_pos + 1] = data[color_pos + 1]
+                        output[target_pos + 2] = data[color_pos + 2]
+
+                pixel_idx += 1
+                if pixel_idx == 4096:
+                    break
+
+            side = row_count * 16
+            palettes = []
+            indices = []
+            for i in range(side * side):
+                r = output[i * 3]
+                g = output[i * 3 + 1]
+                b = output[i * 3 + 2]
+                rgb = (r, g, b, 255)
                 try:
-                    url = f"https://datasets-server.huggingface.co/search?dataset=bghira/free-to-use-pixelart&config=default&split=train&query={urllib.parse.quote(query)}"
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    with urllib.request.urlopen(req, context=self.ctx, timeout=5) as r:
-                        hf_res = json.loads(r.read().decode('utf-8'))
-                        rows = hf_res.get("rows", [])
-                        for row_entry in rows:
-                            row_data = row_entry.get("row", {})
-                            likes = row_data.get("likes_count", 0)
-                            full_url = row_data.get("full_image_url")
-                            if likes >= min_likes and full_url:
-                                results.append({
-                                    "FileId": str(row_entry.get("row_idx", "hf")),
-                                    "FileName": row_data.get("title", query),
-                                    "DownloadUrl": full_url,
-                                    "LikeCnt": likes,
-                                    "pixel_size": row_data.get("pixel_size", 1),
-                                    "source": "pixilart"
-                                })
-                        if results:
-                            logger.info(f"Tier 3 found {len(results)} matches for query '{query}'.")
-                            break
-                except Exception as e:
-                    logger.debug(f"Tier 3 query '{query}' failed or returned no hits: {e}")
+                    idx = palettes.index(rgb)
+                except ValueError:
+                    palettes.append(rgb)
+                    idx = len(palettes) - 1
+                indices.append(idx)
 
-        if not results:
-            logger.warning(f"Keyword search for '{game_name}' (keywords: {candidates}) yielded 0 matching items across all 3 tiers.")
-
-        return results
-
-    def get_recommend_list(self, return_cnt=50, base_cnt=0):
-        """
-        Gets recommended high-quality gallery items from Divoom open catalog.
-        """
-        data = {
-            "ReturnCnt": return_cnt,
-            "BaseCnt": base_cnt
-        }
-        response = self._post("Channel/GetRecommendList", data)
-        results = []
-        if response and response.get("ReturnCode") == 0:
-            file_list = response.get("FileList", [])
-            for item in file_list:
-                file_id = item.get("FileId")
-                if file_id:
-                    item["DownloadUrl"] = f"{self.FILE_URL}{file_id}"
-                results.append(item)
-        return results
-
-    def get_hot_files(self, size=32, return_cnt=20, base_cnt=0):
-        """
-        Gets trending (hot) files dynamically for requested size (16, 32, or 64).
-        Falls back to Hot/GetHotFiles32 if Divoom API returns ReturnCode 10 for specific sizes.
-        """
-        if size not in [16, 32, 64]:
-            size = 32
-        endpoint = f"Hot/GetHotFiles{size}"
-
-        data = {
-            "ReturnCnt": return_cnt,
-            "BaseCnt": base_cnt
-        }
-
-        response = self._post(endpoint, data)
-        if not response or response.get("ReturnCode") != 0:
-            logger.info(f"Endpoint {endpoint} not supported by Divoom server, falling back to Hot/GetHotFiles32")
-            response = self._post("Hot/GetHotFiles32", data)
-
-        results = []
-        if response and response.get("ReturnCode") == 0:
-            if "FileList" in response:
-                file_list = response.get("FileList", [])
-                for item in file_list:
-                    file_id = item.get("FileId")
-                    if file_id:
-                        item["DownloadUrl"] = f"{self.FILE_URL}{file_id}"
-                    results.append(item)
-            elif "VendorList" in response:
-                vendors = response.get("VendorList", [])
-                for vendor in vendors:
-                    file_list = vendor.get("FileList", [])
-                    for item in file_list:
-                        file_id = item.get("FileId")
-                        if file_id:
-                            item["DownloadUrl"] = f"{self.FILE_URL}{file_id}"
-                        results.append(item)
-
-        return results
-
-    def get_hot_experts(self, return_cnt=10, base_cnt=0):
-        """
-        Fetches trending artists on Divoom.
-        """
-        data = {
-            "ReturnCnt": return_cnt,
-            "BaseCnt": base_cnt
-        }
-        response = self._post("Cloud/GetHotExpert", data)
-
-        if response and response.get("ReturnCode") == 0:
-            return response.get("ExpertList", [])
-        return []
+            return side, palettes, indices
+        except Exception as e:
+            logger.debug(f"Failed to parse v3 container: {e}")
+            return None
 
     def _parse_spil_frame(self, content):
         """
@@ -429,7 +456,7 @@ class DivoomGalleryAPI:
 
         try:
             from PIL import Image
-            parsed = self._parse_spil_frame(content)
+            parsed = self._parse_divoom_v3_container(content) or self._parse_spil_frame(content)
             if not parsed:
                 return None
             side, palette, indices = parsed
@@ -469,7 +496,7 @@ class DivoomGalleryAPI:
             import struct
             import zlib
 
-            parsed = self._parse_spil_frame(content)
+            parsed = self._parse_divoom_v3_container(content) or self._parse_spil_frame(content)
             if not parsed:
                 return None
             side, palette, indices = parsed

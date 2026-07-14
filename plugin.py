@@ -43,7 +43,7 @@ class SteamPlugin(PixooPluginBase):
         self.current_art_path = os.path.join(self.cache_dir, "current_art.png")
         
         from divoom_api import DivoomGalleryAPI
-        self.divoom_api = DivoomGalleryAPI()
+        self.divoom_api = DivoomGalleryAPI(config=self.config)
         
         self.pixoo = self.get_pixoo_instance()
         
@@ -69,7 +69,7 @@ class SteamPlugin(PixooPluginBase):
         logger.info(f"Searching pixel arts for game: {game_name}")
         artworks = []
         try:
-            results = self.divoom_api.smart_search_gallery(game_name, size=64, min_likes=self.min_likes)
+            results = self.divoom_api.smart_search_gallery(game_name, size=64, min_likes=self.min_likes, return_cnt=100)
             for item in results:
                 artworks.append({
                     "title": item.get("FileName", game_name),
@@ -126,6 +126,37 @@ class SteamPlugin(PixooPluginBase):
         except Exception as e:
             logger.error(f"Error processing art '{art_item['title']}': {e}")
             return False
+
+    def cleanup_cache(self):
+        """
+        Completely deletes ('restlos löschen') all temporary art files when game stops or plugin exits.
+        """
+        try:
+            if os.path.exists(self.current_art_path):
+                os.remove(self.current_art_path)
+                logger.info("Deleted current_art.png from cache.")
+            if os.path.exists(self.cache_dir):
+                for filename in os.listdir(self.cache_dir):
+                    filepath = os.path.join(self.cache_dir, filename)
+                    if os.path.isfile(filepath):
+                        os.remove(filepath)
+                logger.info("Cleared all temporary images from cache directory.")
+        except Exception as e:
+            logger.error(f"Error cleaning up cache directory: {e}")
+
+    def release_screen(self):
+        """
+        Clears the Pixoo display, resets memory state, and deletes all cached images completely.
+        """
+        self.art_list = []
+        self.art_index = 0
+        self.cleanup_cache()
+        if self.pixoo:
+            try:
+                self.pixoo.fill((0, 0, 0))
+                self.pixoo.push()
+            except Exception as e:
+                logger.error(f"Error releasing screen: {e}")
 
     def loop(self):
         while self.running:

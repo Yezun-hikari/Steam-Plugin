@@ -23,6 +23,22 @@
         },
         {
             "type": "header",
+            "label": "Divoom Cloud Configuration"
+        },
+        {
+            "name": "divoom_email",
+            "label": "Divoom Account Email",
+            "type": "text",
+            "info": "Optional: Your Divoom Cloud email required for Tag Gallery search"
+        },
+        {
+            "name": "divoom_password",
+            "label": "Divoom Account Password",
+            "type": "password",
+            "info": "Optional: Your Divoom Cloud password"
+        },
+        {
+            "type": "header",
             "label": "Display Options"
         },
         {

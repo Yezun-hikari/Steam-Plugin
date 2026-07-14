@@ -92,10 +92,10 @@ class TestDivoomComprehensive(unittest.TestCase):
 
     @patch.object(DivoomGalleryAPI, 'search_gallery')
     def test_smart_search_gallery_size_fallback(self, mock_search):
-        # Suppose search for 'Orc' on size=64 yields 0 hits, but size=32 yields 1 hit
+        # Suppose search for 'Orc' returns items of size 32 (FileSize=2) when searching at size=64
         def side_effect(query, size=64, return_cnt=20):
-            if query.lower() == "orc" and size == 32:
-                return [{"FileId": "item_32_orc", "LikeCnt": 50, "FileName": "Orc Fighter"}]
+            if query.lower() == "orc":
+                return [{"FileId": "item_32_orc", "LikeCnt": 50, "FileName": "Orc Fighter", "FileSize": 2}]
             return []
         mock_search.side_effect = side_effect
 
@@ -201,8 +201,9 @@ class TestDivoomComprehensive(unittest.TestCase):
         
         success = plugin.download_and_process_art(art_item)
         self.assertTrue(success)
+
     @patch.object(DivoomGalleryAPI, 'search_gallery')
-    def test_smart_search_gallery_tier1_success(self, mock_search):
+    def test_smart_search_gallery_tag_success(self, mock_search):
         mock_search.return_value = [{
             "FileId": "t1_fake",
             "FileName": "Orcs Must Die Battle",
@@ -214,38 +215,17 @@ class TestDivoomComprehensive(unittest.TestCase):
         self.assertEqual(results[0]["FileId"], "t1_fake")
         self.assertEqual(results[0]["pixel_size"], 1)
 
-    @patch.object(DivoomGalleryAPI, 'search_gallery', return_value=[])
-    @patch.object(DivoomGalleryAPI, 'get_hot_files')
-    @patch.object(DivoomGalleryAPI, 'get_recommend_list', return_value=[])
-    def test_smart_search_gallery_tier2_curated_match(self, mock_rec, mock_hot, mock_search):
-        mock_hot.return_value = [
-            {"FileId": "hot_1", "FileName": "Awesome Orc Warrior", "LikeCnt": 50, "FileSize": 4},
-            {"FileId": "hot_2", "FileName": "Random Clock", "LikeCnt": 100, "FileSize": 4}
-        ]
-        results = self.api.smart_search_gallery("Orcs Must Die! Deathtrap", size=64, min_likes=10, return_cnt=5)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["FileId"], "hot_1")
-        self.assertIn("Orc Warrior", results[0]["FileName"])
+    @patch.object(DivoomGalleryAPI, '_post')
+    def test_login_success_and_search_gallery_headers(self, mock_post):
+        mock_post.return_value = {"ReturnCode": 0, "Token": "test_tok_123", "UserId": 998877}
+        self.api.login(email="test@example.com", password="secret_password")
+        self.assertEqual(self.api.token, "test_tok_123")
+        self.assertEqual(self.api.user_id, 998877)
 
-    @patch.object(DivoomGalleryAPI, 'search_gallery', return_value=[])
-    @patch.object(DivoomGalleryAPI, 'get_hot_files', return_value=[])
-    @patch.object(DivoomGalleryAPI, 'get_recommend_list', return_value=[])
-    @patch('urllib.request.urlopen')
-    def test_smart_search_gallery_tier3_dataset_match(self, mock_urlopen, mock_rec, mock_hot, mock_search):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "rows": [
-                {"row_idx": 999, "row": {"title": "Fantasy Orc Castle", "likes_count": 25, "full_image_url": "http://fake-hf/orc.png", "pixel_size": 1}}
-            ]
-        }).encode('utf-8')
-        mock_response.__enter__.return_value = mock_response
-        mock_urlopen.return_value = mock_response
-
-        results = self.api.smart_search_gallery("Orcs Must Die! Deathtrap", size=64, min_likes=10, return_cnt=5)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["FileId"], "999")
-        self.assertEqual(results[0]["source"], "pixilart")
-        self.assertEqual(results[0]["DownloadUrl"], "http://fake-hf/orc.png")
+        mock_post.return_value = {"ReturnCode": 0, "FileList": [{"FileId": "f1", "FileName": "Orc Item"}]}
+        res = self.api.search_gallery("Orc", size=64)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["DownloadUrl"], "https://f.divoom-gz.com/f1")
 
     def test_decode_to_png_bytes_invalid_input(self):
         self.assertIsNone(self.api.decode_to_png_bytes(b"not a valid spil or png"))
