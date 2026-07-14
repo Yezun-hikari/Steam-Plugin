@@ -237,5 +237,39 @@ class TestDivoomComprehensive(unittest.TestCase):
         self.assertIn("Counter Strike", keywords)
         self.assertIn("Counter", keywords)
 
+class TestPreCommitVersionBump(unittest.TestCase):
+    def test_plugin_json_version(self):
+        plugin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.json")
+        self.assertTrue(os.path.exists(plugin_path))
+        with open(plugin_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("version", data)
+        # Verify semver format
+        parts = data["version"].split(".")
+        self.assertEqual(len(parts), 3)
+        for part in parts:
+            self.assertTrue(part.isdigit())
+
+    def test_pre_commit_hooks_exist_and_executable(self):
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        for hook_path in [
+            os.path.join(root_dir, ".githooks", "pre-commit"),
+            os.path.join(root_dir, ".git", "hooks", "pre-commit")
+        ]:
+            if os.path.exists(hook_path):
+                self.assertTrue(os.access(hook_path, os.X_OK), f"{hook_path} is not executable")
+
+    def test_version_increment_regex_logic(self):
+        import re
+        sample_json = '{\n    "name": "Steam Pixel Art",\n    "version": "1.0.9",\n    "author": "Tim"\n}'
+        match = re.search(r'"version"\s*:\s*"(\d+)\.(\d+)\.(\d+)"', sample_json)
+        self.assertIsNotNone(match)
+        major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        new_version = f"{major}.{minor}.{patch + 1}"
+        new_content = sample_json[:match.start(1)] + new_version + sample_json[match.end(3):]
+        self.assertIn('"version": "1.0.10"', new_content)
+        self.assertTrue(new_content.startswith('{\n    "name": "Steam Pixel Art",\n'))
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

@@ -1,0 +1,80 @@
+#!/bin/sh
+# pre-commit hook to automatically increment plugin.json version before each commit
+
+PYTHON_CMD=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+fi
+
+if [ -z "$PYTHON_CMD" ]; then
+    echo "[pre-commit] Warning: Neither python3 nor python found. Skipping auto version bump."
+    exit 0
+fi
+
+$PYTHON_CMD - << 'EOF'
+import json
+import os
+import re
+import subprocess
+import sys
+
+def get_head_version():
+    try:
+        head_content = subprocess.check_output(
+            ["git", "show", "HEAD:plugin.json"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        match = re.search(r'"version"\s*:\s*"(\d+\.\d+\.\d+)"', head_content)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+def main():
+    if not os.path.exists("plugin.json"):
+        return 0
+
+    try:
+        with open("plugin.json", "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"[pre-commit] Error reading plugin.json: {e}", file=sys.stderr)
+        return 1
+
+    match = re.search(r'"version"\s*:\s*"(\d+)\.(\d+)\.(\d+)"', content)
+    if not match:
+        print("[pre-commit] Could not find version pattern in plugin.json", file=sys.stderr)
+        return 0
+
+    current_version = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
+    head_version = get_head_version()
+
+    # If the version in plugin.json was already modified relative to HEAD (e.g. manual bump or right now),
+    # do not double-increment it on this commit.
+    if head_version and current_version != head_version:
+        print(f"[pre-commit] plugin.json version already updated ({head_version} -> {current_version}), keeping current version.")
+        return 0
+
+    major, minor, patch = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    new_version = f"{major}.{minor}.{patch + 1}"
+
+    new_content = content[:match.start(1)] + new_version + content[match.end(3):]
+
+    try:
+        with open("plugin.json", "w", encoding="utf-8") as f:
+            f.write(new_content)
+        subprocess.check_call(["git", "add", "plugin.json"])
+        print(f"[pre-commit] Auto-incremented plugin.json version: {current_version} -> {new_version}")
+    except Exception as e:
+        print(f"[pre-commit] Failed to update plugin.json version: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+EOF
