@@ -302,6 +302,18 @@ class DivoomGalleryAPI:
         if not data or len(data) < 10 or row_count <= 0:
             return None
 
+        if data[0] not in (0xaa, 0x00):
+            aa_idx = data.find(b'\xaa')
+            if aa_idx != -1:
+                data = data[aa_idx:]
+            else:
+                aa_idx = content.find(b'\xaa')
+                if aa_idx != -1:
+                    data = content[aa_idx:]
+
+        if len(data) < 10 or data[0] not in (0xaa, 0x00):
+            return None
+
         try:
             uVar13 = data[6]
             iVar11 = uVar13 * 3
@@ -366,7 +378,7 @@ class DivoomGalleryAPI:
 
             side = row_count * 16
             palettes = []
-            indices = []
+            raw_indices = []
             for i in range(side * side):
                 r = output[i * 3]
                 g = output[i * 3 + 1]
@@ -377,7 +389,20 @@ class DivoomGalleryAPI:
                 except ValueError:
                     palettes.append(rgb)
                     idx = len(palettes) - 1
-                indices.append(idx)
+                raw_indices.append(idx)
+
+            # Untile from 16x16 blocks into linear row-major scanline order (y * side + x)
+            tiles_per_row = side // 16
+            indices = [0] * (side * side)
+            for i, idx in enumerate(raw_indices):
+                tile_id = i // 256
+                t_col = tile_id % tiles_per_row
+                t_row = tile_id // tiles_per_row
+                in_t = i % 256
+                gx = t_col * 16 + (in_t % 16)
+                gy = t_row * 16 + (in_t // 16)
+                if gy * side + gx < len(indices):
+                    indices[gy * side + gx] = idx
 
             return side, palettes, indices
         except Exception as e:

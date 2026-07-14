@@ -218,6 +218,24 @@ class TestDivoomComprehensive(unittest.TestCase):
             self.assertIsNotNone(parsed)
             self.assertEqual(parsed[0], expected_side)
 
+    def test_parse_divoom_v3_untiling(self):
+        # Verify that 16x16 tiles are properly untiled into linear row-major scanline order
+        # For a 32x32 image (row_count=2), tile 1 (indices 256..511) occupies top-right quadrant (x=16..31, y=0..15).
+        row_count = 2
+        pal_bytes = b'\xff\x00\x00' + b'\x00\xff\x00' + (b'\x00\x00\xff' * 254) # red, green, blue...
+        # We construct 1024 raw indices where tile 0 is color 0 and tile 1 is color 1
+        raw_idx = [0] * 256 + [1] * 256 + [0] * 512
+        data_payload = b'\xaa\x00\x00\x00\x01\x0c\x00\x00' + pal_bytes + bytes(raw_idx)
+        v3_header = b'\x1a' + struct.pack('>BHBB', 1, 100, row_count, row_count) + struct.pack('>I', len(data_payload))
+        parsed = self.api._parse_divoom_v3_container(v3_header + data_payload)
+        self.assertIsNotNone(parsed)
+        side, pal, indices = parsed
+        self.assertEqual(side, 32)
+        # Linear check: (x=16, y=0) must come from tile 1 (color index 1)
+        self.assertEqual(indices[0 * side + 16], 1)
+        # Linear check: (x=0, y=0) must come from tile 0 (color index 0)
+        self.assertEqual(indices[0 * side + 0], 0)
+
     # ==========================================
     # 4. STEAM PLUGIN COMPREHENSIVE TESTS
     # ==========================================
