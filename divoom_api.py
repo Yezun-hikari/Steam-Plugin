@@ -256,26 +256,53 @@ class DivoomGalleryAPI:
         import io
         import struct
 
-        if not content or len(content) < 30:
+        if not content or len(content) < 15:
             return None
 
+        row_count = 0
+        data = None
+
         pos = content.find(b'\x1a')
-        if pos == -1 or pos > 64:
+        if pos != -1 and pos <= 64 and pos + 10 < len(content):
+            try:
+                fp = io.BytesIO(content[pos + 1 :])
+                total_frames, speed, r_cnt, c_cnt = struct.unpack('>BHBB', fp.read(5))
+                if 0 < r_cnt <= 8 and 0 < c_cnt <= 8 and 0 < total_frames <= 1000:
+                    size = struct.unpack('>I', fp.read(4))[0]
+                    if 0 < size <= len(content):
+                        data = fp.read(size)
+                        row_count = r_cnt
+            except Exception:
+                pass
+
+        if not data:
+            pos = content.find(b'\x12')
+            if pos != -1 and pos <= 64 and pos + 6 < len(content):
+                try:
+                    fp = io.BytesIO(content[pos + 1 :])
+                    total_frames, speed, r_cnt, c_cnt = struct.unpack('>BHBB', fp.read(5))
+                    if r_cnt == 2 and c_cnt == 2 and 0 < total_frames <= 1000:
+                        data = content[pos + 6 :]
+                        row_count = 2
+                except Exception:
+                    pass
+
+        if not data:
+            pos = content.find(b'\x09')
+            if pos != -1 and pos <= 64 and pos + 4 < len(content):
+                try:
+                    fp = io.BytesIO(content[pos + 1 :])
+                    total_frames, speed = struct.unpack('>BH', fp.read(3))
+                    if 0 < total_frames <= 1000:
+                        data = content[pos + 4 :]
+                        row_count = 1
+                except Exception:
+                    pass
+
+        if not data or len(data) < 10 or row_count <= 0:
             return None
 
         try:
-            fp = io.BytesIO(content[pos + 1 :])
-            total_frames, speed, row_count, column_count = struct.unpack('>BHBB', fp.read(5))
-            if row_count <= 0 or column_count <= 0 or total_frames <= 0 or total_frames > 1000:
-                return None
-
-            size = struct.unpack('>I', fp.read(4))[0]
-            if size <= 0:
-                return None
-            data = fp.read(size)
-            if not data or len(data) < 10:
-                return None
-
             uVar13 = data[6]
             iVar11 = uVar13 * 3
             if uVar13 == 0:
