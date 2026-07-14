@@ -174,13 +174,12 @@ class DivoomGalleryAPI:
         candidates = self.extract_logical_keywords(game_name)
         logger.info(f"Analyzed logical keywords for '{game_name}': {candidates}")
 
-        # Search candidates systematically across sizes 64, 32, and 16
+        # Tier 1: Direct Divoom Cloud Search across sizes 64, 32, and 16
         for query in candidates:
             logger.info(f"Searching Divoom Gallery (size={size}) with keyword: '{query}'")
             res = self.search_gallery(query, size=size, return_cnt=return_cnt)
             add_results(res, fallback_pixel_size=1)
 
-            # If no results found at target size, immediately check size=32 and size=16 for this exact keyword
             if not res and size != 32:
                 logger.info(f"No {size}x{size} matches for '{query}', checking 32x32...")
                 res32 = self.search_gallery(query, size=32, return_cnt=return_cnt)
@@ -193,9 +192,84 @@ class DivoomGalleryAPI:
             if len(results) >= 3:
                 break
 
+        # Tier 2: Hybrid Keyword Matching against open Divoom Curated Catalogs (RecommendList & HotFiles)
         if not results:
-            logger.warning(f"Keyword search for '{game_name}' (keywords: {candidates}) yielded 0 matching Divoom Gallery items.")
+            logger.info(f"Tier 1 yielded 0 direct matches for '{game_name}'. Checking Tier 2: Divoom Curated Catalogs...")
+            curated_items = []
+            try:
+                curated_items.extend(self.get_recommend_list(return_cnt=50))
+                curated_items.extend(self.get_hot_files(size=64, return_cnt=50))
+                curated_items.extend(self.get_hot_files(size=32, return_cnt=50))
+            except Exception as e:
+                logger.error(f"Error fetching curated catalogs in Tier 2: {e}")
 
+            # Match items whose title/filename contains any of our candidate strings or token words
+            tokens = set()
+            for cand in candidates:
+                tokens.add(cand.lower())
+                for word in cand.lower().split():
+                    if len(word) >= 3:
+                        tokens.add(word)
+
+            for item in curated_items:
+                fname = str(item.get("FileName", "")).lower()
+                if any(t in fname for t in tokens):
+                    if item.get("LikeCnt", 0) >= min_likes:
+                        add_results([item], fallback_pixel_size=1 if item.get("FileSize") == 4 else (2 if item.get("FileSize") == 2 else 4))
+                        if len(results) >= return_cnt:
+                            break
+
+        # Tier 3: Supplementary Public Dataset Search (e.g. HuggingFace free-to-use-pixelart dataset)
+        if not results:
+            logger.info(f"Tier 2 yielded 0 catalog matches for '{game_name}'. Checking Tier 3: Public Tagged Dataset...")
+            for query in candidates:
+                try:
+                    url = f"https://datasets-server.huggingface.co/search?dataset=bghira/free-to-use-pixelart&config=default&split=train&query={urllib.parse.quote(query)}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, context=self.ctx, timeout=5) as r:
+                        hf_res = json.loads(r.read().decode('utf-8'))
+                        rows = hf_res.get("rows", [])
+                        for row_entry in rows:
+                            row_data = row_entry.get("row", {})
+                            likes = row_data.get("likes_count", 0)
+                            full_url = row_data.get("full_image_url")
+                            if likes >= min_likes and full_url:
+                                results.append({
+                                    "FileId": str(row_entry.get("row_idx", "hf")),
+                                    "FileName": row_data.get("title", query),
+                                    "DownloadUrl": full_url,
+                                    "LikeCnt": likes,
+                                    "pixel_size": row_data.get("pixel_size", 1),
+                                    "source": "pixilart"
+                                })
+                        if results:
+                            logger.info(f"Tier 3 found {len(results)} matches for query '{query}'.")
+                            break
+                except Exception as e:
+                    logger.debug(f"Tier 3 query '{query}' failed or returned no hits: {e}")
+
+        if not results:
+            logger.warning(f"Keyword search for '{game_name}' (keywords: {candidates}) yielded 0 matching items across all 3 tiers.")
+
+        return results
+
+    def get_recommend_list(self, return_cnt=50, base_cnt=0):
+        """
+        Gets recommended high-quality gallery items from Divoom open catalog.
+        """
+        data = {
+            "ReturnCnt": return_cnt,
+            "BaseCnt": base_cnt
+        }
+        response = self._post("Channel/GetRecommendList", data)
+        results = []
+        if response and response.get("ReturnCode") == 0:
+            file_list = response.get("FileList", [])
+            for item in file_list:
+                file_id = item.get("FileId")
+                if file_id:
+                    item["DownloadUrl"] = f"{self.FILE_URL}{file_id}"
+                results.append(item)
         return results
 
     def get_hot_files(self, size=32, return_cnt=20, base_cnt=0):
