@@ -161,13 +161,16 @@ class TestDivoomComprehensive(unittest.TestCase):
         except ImportError:
             self.assertIsNone(img)
 
-        # 2. Test decode_to_png_bytes (pure Python fallback verification)
+        # 2. Test decode_to_png_bytes (pure Python fallback verification generates exact 64x64 output)
         png_bytes = self.api.decode_to_png_bytes(data)
         self.assertIsNotNone(png_bytes)
         self.assertTrue(png_bytes.startswith(b'\x89PNG\r\n\x1a\n'))
         self.assertIn(b'IHDR', png_bytes)
         self.assertIn(b'IDAT', png_bytes)
         self.assertIn(b'IEND', png_bytes)
+        import struct
+        w, h = struct.unpack('>II', png_bytes[16:24])
+        self.assertEqual((w, h), (64, 64))
 
     def test_parse_spil_frame_corrupt_or_short(self):
         self.assertIsNone(self.api._parse_spil_frame(b"short"))
@@ -224,6 +227,13 @@ class TestDivoomComprehensive(unittest.TestCase):
         
         success = plugin.download_and_process_art(art_item)
         self.assertTrue(success)
+        self.assertTrue(os.path.exists(plugin.current_art_path))
+        try:
+            from PIL import Image
+            with Image.open(plugin.current_art_path) as img:
+                self.assertEqual(img.size, (64, 64))
+        except ImportError:
+            pass
 
     @patch.object(DivoomGalleryAPI, 'search_gallery')
     def test_smart_search_gallery_tag_success(self, mock_search):

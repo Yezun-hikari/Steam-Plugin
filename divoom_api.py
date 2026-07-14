@@ -415,6 +415,13 @@ class DivoomGalleryAPI:
                     break
 
         if not detected_sz:
+            for candidate_sz in [64, 32, 16, 8]:
+                expected_raw_len = candidate_sz * candidate_sz * bit_width // 8
+                if expected_raw_len <= len(raw) <= expected_raw_len + 16:
+                    detected_sz = candidate_sz
+                    break
+
+        if not detected_sz:
             best_sz = 16
             best_score = 999.0
             for sz in [64, 32, 16, 8]:
@@ -427,8 +434,6 @@ class DivoomGalleryAPI:
                 diff_h = sum(1 for y in range(sz) for x in range(sz - 1) if ind[y*sz + x] != ind[y*sz + x + 1]) / max(1, sz * (sz - 1))
                 diff_v = sum(1 for y in range(sz - 1) for x in range(sz) if ind[y*sz + x] != ind[(y + 1)*sz + x]) / max(1, sz * (sz - 1))
                 score = diff_h + diff_v
-                if sz == 64: score += 0.15
-                elif sz == 32: score += 0.05
                 if score < best_score:
                     best_score = score
                     best_sz = sz
@@ -486,6 +491,9 @@ class DivoomGalleryAPI:
             from PIL import Image
             img = self.decode_image(content)
             if img:
+                if img.width != 64 or img.height != 64:
+                    if img.width == img.height or (img.width in (8, 16, 32, 64, 128) and img.height in (8, 16, 32, 64, 128)):
+                        img = img.resize((64, 64), Image.Resampling.NEAREST)
                 buf = BytesIO()
                 img.save(buf, format="PNG")
                 return buf.getvalue()
@@ -501,9 +509,12 @@ class DivoomGalleryAPI:
                 return None
             side, palette, indices = parsed
 
+            scale = 64 // side if (side > 0 and 64 % side == 0) else 1
+            out_side = side * scale
+
             raw_scanlines = bytearray()
             for y in range(side):
-                raw_scanlines.append(0)  # PNG filter byte None (0)
+                scanline = bytearray()
                 for x in range(side):
                     idx = indices[y * side + x]
                     if idx < len(palette):
@@ -512,7 +523,11 @@ class DivoomGalleryAPI:
                         rgba = palette[idx % len(palette)]
                     else:
                         rgba = (0, 0, 0, 255)
-                    raw_scanlines.extend(bytes(rgba[:3]))  # RGB bytes
+                    for _ in range(scale):
+                        scanline.extend(bytes(rgba[:3]))  # RGB bytes
+                for _ in range(scale):
+                    raw_scanlines.append(0)  # PNG filter byte None (0)
+                    raw_scanlines.extend(scanline)
 
             compressed = zlib.compress(raw_scanlines)
 
@@ -520,7 +535,7 @@ class DivoomGalleryAPI:
                 return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff)
 
             png_data = b'\x89PNG\r\n\x1a\n'
-            png_data += make_chunk(b'IHDR', struct.pack('>IIBBBBB', side, side, 8, 2, 0, 0, 0))
+            png_data += make_chunk(b'IHDR', struct.pack('>IIBBBBB', out_side, out_side, 8, 2, 0, 0, 0))
             png_data += make_chunk(b'IDAT', compressed)
             png_data += make_chunk(b'IEND', b'')
             return png_data

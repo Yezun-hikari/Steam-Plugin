@@ -108,19 +108,20 @@ class SteamPlugin(PixooPluginBase):
                 if not img:
                     raise ValueError("Could not decode image or SPIL binary format from Divoom CDN")
                 
-                pixel_size = max(1, int(art_item.get("pixel_size", 1)))
+                # Ensure the image is cleanly displayed on a 64x64 LED display.
+                # If the image is 32x32, 16x16, 8x8 (or any non-64 size from fallback searches),
+                # upscale/downscale using NEAREST to keep sharp pixel edges without any blurring or cropping.
+                if img.width != 64 or img.height != 64:
+                    if img.width == img.height or (img.width in (8, 16, 32, 64, 128) and img.height in (8, 16, 32, 64, 128)):
+                        img = img.resize((64, 64), Image.Resampling.NEAREST)
+                    else:
+                        scale = min(64 / max(1, img.width), 64 / max(1, img.height))
+                        new_w = max(1, int(img.width * scale))
+                        new_h = max(1, int(img.height * scale))
+                        img = img.resize((new_w, new_h), Image.Resampling.NEAREST)
                 
-                # Downscale by exactly the pixel_size to extract the pure 1:1 original pixel art
-                # Nearest neighbor scaling prevents ANY blur or pixel mush
-                if pixel_size > 1:
-                    new_width = max(1, img.width // pixel_size)
-                    new_height = max(1, img.height // pixel_size)
-                    img = img.resize((new_width, new_height), Image.Resampling.NEAREST)
-                
-                # Create a 64x64 black canvas
+                # Create a 64x64 black canvas and center paste the scaled image
                 canvas = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
-                
-                # Crop or pad the image to fit 64x64
                 offset_x = (64 - img.width) // 2
                 offset_y = (64 - img.height) // 2
                 canvas.paste(img, (offset_x, offset_y), img)
