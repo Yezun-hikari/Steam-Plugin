@@ -196,6 +196,28 @@ class TestDivoomComprehensive(unittest.TestCase):
         except ImportError:
             pass
 
+    def test_parse_spil_frame_bogus_prefix_rejection(self):
+        # Create a real SPIL binary
+        data, expected_indices = self._create_synthetic_spil_bin(side=16, n_colors=4)
+        # Prepend a bogus 0xAA byte with invalid subframe ID and misleading length/speed bytes
+        bogus_prefix = b'\xaa\x99' + struct.pack('<H', 100) + b'\x64\x00\x10\x00' + b'\x00' * 30
+        full_data = bogus_prefix + data[17:] # Real header is at offset 17 in data
+        parsed = self.api._parse_spil_frame(full_data)
+        self.assertIsNotNone(parsed, "Failed to reject bogus prefix and parse true SPIL frame")
+        self.assertEqual(parsed[0], 16)
+        self.assertEqual(len(parsed[1]), 4)
+
+    def test_parse_divoom_v3_container_sizes(self):
+        # Test V3 container extraction for side=16 and side=32
+        for row_count, expected_side in [(1, 16), (2, 32)]:
+            pal_bytes = b'\xff\x00\x00' * 4
+            indices_bytes = b'\x00\x01\x02\x03' * ((expected_side * expected_side * 2 + 7) // 8)
+            data_payload = b'\x00\x00\x00\x00\x01\x0c\x04\x00' + pal_bytes + indices_bytes
+            v3_header = b'\x00' * 5 + b'\x1a' + struct.pack('>BHBB', 1, 100, row_count, row_count) + struct.pack('>I', len(data_payload))
+            parsed = self.api._parse_divoom_v3_container(v3_header + data_payload)
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed[0], expected_side)
+
     # ==========================================
     # 4. STEAM PLUGIN COMPREHENSIVE TESTS
     # ==========================================

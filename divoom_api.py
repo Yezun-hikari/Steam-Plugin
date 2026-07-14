@@ -334,7 +334,7 @@ class DivoomGalleryAPI:
                         output[target_pos + 2] = data[color_pos + 2]
 
                 pixel_idx += 1
-                if pixel_idx == 4096:
+                if pixel_idx == 4096 or pixel_idx >= (row_count * 16) * (row_count * 16):
                     break
 
             side = row_count * 16
@@ -374,6 +374,10 @@ class DivoomGalleryAPI:
             if content[pos] != 0xaa:
                 continue
             
+            block_id = content[pos+1]
+            if block_id not in (0xc1, 0xc2, 0xc3, 0xc0, 0x88, 0x01, 0x02, 0x04, 0x1a):
+                continue
+
             try:
                 hdr_len = struct.unpack('<H', content[pos+2:pos+4])[0]
             except Exception:
@@ -386,83 +390,82 @@ class DivoomGalleryAPI:
                 payload_candidates.append(content[pos+4 :])
                 
             for payload in payload_candidates:
-                color_counts = []
                 if len(payload) >= 4:
                     try:
-                        color_counts.append((struct.unpack('<H', payload[2:4])[0], 4))
-                        color_counts.append((struct.unpack('<H', payload[0:2])[0], 2))
+                        n_colors = struct.unpack('<H', payload[2:4])[0]
+                        if 1 <= n_colors <= 256 and 4 + n_colors * 3 <= len(payload):
+                            pal = []
+                            for i in range(n_colors):
+                                r, g, b = payload[4 + i*3 : 4 + (i+1)*3]
+                                pal.append((r, g, b, 255))
+                            raw = payload[4 + n_colors * 3 :]
+                            if len(raw) >= 8:
+                                candidates.append((n_colors, pal, raw))
                     except Exception:
                         pass
-                if len(payload) >= 3:
-                    color_counts.append((payload[2], 3))
-                    color_counts.append((payload[0], 1))
-                    
-                for n_colors, color_offset in color_counts:
-                    if 1 <= n_colors <= 256 and color_offset + n_colors * 3 <= len(payload):
-                        pal = []
-                        for i in range(n_colors):
-                            r, g, b = payload[color_offset + i*3 : color_offset + (i+1)*3]
-                            pal.append((r, g, b, 255))
-                        raw = payload[color_offset + n_colors * 3 :]
-                        if len(raw) >= 8:
-                            candidates.append((n_colors, pal, raw))
 
-        # Raw SPIL fallback (if no 0xAA header or if 0xAA failed)
-        for color_offset in [2, 0, 4]:
-            if len(content) >= color_offset + 2:
-                try:
-                    n_col = struct.unpack('<H', content[color_offset : color_offset+2])[0]
-                    if 1 <= n_col <= 256 and color_offset + 2 + n_col * 3 <= len(content):
-                        pal = []
-                        for i in range(n_col):
-                            r, g, b = content[color_offset + 2 + i*3 : color_offset + 2 + (i+1)*3]
-                            pal.append((r, g, b, 255))
-                        raw = content[color_offset + 2 + n_col * 3 :]
-                        if len(raw) >= 8:
-                            candidates.append((n_col, pal, raw))
-                except Exception:
-                    pass
+        # Raw SPIL fallback (if no valid 0xAA header found)
+        if not candidates:
+            for color_offset in [2, 0, 4]:
+                if len(content) >= color_offset + 2:
+                    try:
+                        n_col = struct.unpack('<H', content[color_offset : color_offset+2])[0]
+                        if 1 <= n_col <= 256 and color_offset + 2 + n_col * 3 <= len(content):
+                            pal = []
+                            for i in range(n_col):
+                                r, g, b = content[color_offset + 2 + i*3 : color_offset + 2 + (i+1)*3]
+                                pal.append((r, g, b, 255))
+                            raw = content[color_offset + 2 + n_col * 3 :]
+                            if len(raw) >= 8:
+                                candidates.append((n_col, pal, raw))
+                    except Exception:
+                        pass
 
         if not candidates:
             return None
 
-        # Try every candidate until we get a valid frame match
+        # Try every candidate until we get a valid frame match whose indices fit the palette bounds
         for n_colors, palette, raw in candidates:
             bit_width = max(1, math.ceil(math.log2(n_colors)))
             if not raw:
                 continue
 
-            # Unpack continuous little-endian bit stream
             bits = []
             for b in raw[: 4096 * bit_width // 8 + 10]:
                 for bit_idx in range(8):
                     bits.append((b >> bit_idx) & 1)
 
-            # Detect exact side length (64, 32, 16, 8)
             detected_sz = None
             for candidate_sz in [64, 32, 16, 8]:
-                frame_payload = candidate_sz * candidate_sz * bit_width // 8
-                header_pos = frame_payload
-                if header_pos + 8 <= len(raw) and raw[header_pos] == 0xaa:
-                    next_pos = header_pos + 8 + frame_payload
+                expected_raw_len = candidate_sz * candidate_sz * bit_width // 8
+                if len(raw) < expected_raw_len + 8:
+                    continue
+                header_pos = expected_raw_len
+                if raw[header_pos] == 0xaa:
+                    next_pos = header_pos + 8 + expected_raw_len
                     if next_pos + 8 <= len(raw) and raw[next_pos] == 0xaa:
+                        detected_sz = candidate_sz
+                        break
+                    elif next_pos >= len(raw) - 8:
                         detected_sz = candidate_sz
                         break
 
             if not detected_sz:
                 for candidate_sz in [64, 32, 16, 8]:
                     expected_raw_len = candidate_sz * candidate_sz * bit_width // 8
-                    if expected_raw_len <= len(raw) <= expected_raw_len + 16:
+                    if expected_raw_len <= len(raw) <= expected_raw_len + 64:
                         detected_sz = candidate_sz
                         break
 
             if not detected_sz:
-                best_sz = 16
+                best_sz = None
                 best_score = 999.0
                 for sz in [64, 32, 16, 8]:
                     if sz * sz * bit_width // 8 > len(raw):
                         continue
                     ind = [sum(bits[i*bit_width + j] * (1 << j) for j in range(bit_width)) for i in range(sz * sz)]
+                    if sum(1 for idx in ind if idx >= n_colors) > max(1, int(sz * sz * 0.02)):
+                        continue
                     rep = sum(1 for y in range(sz) if ind[y*sz : y*sz + sz//2] == ind[y*sz + sz//2 : y*sz + sz])
                     if rep >= sz * 0.8:
                         continue
@@ -472,12 +475,20 @@ class DivoomGalleryAPI:
                     if score < best_score:
                         best_score = score
                         best_sz = sz
-                detected_sz = best_sz
+                if best_sz is not None:
+                    detected_sz = best_sz
+
+            if not detected_sz:
+                continue
 
             indices = []
             for i in range(detected_sz * detected_sz):
                 chunk = bits[i*bit_width : (i+1)*bit_width]
                 indices.append(sum(bit * (1 << j) for j, bit in enumerate(chunk)))
+
+            invalid_indices = sum(1 for idx in indices if idx >= n_colors)
+            if invalid_indices > max(1, int(len(indices) * 0.02)):
+                continue
 
             return detected_sz, palette, indices
 
