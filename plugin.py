@@ -50,6 +50,18 @@ class SteamPlugin(PixooPluginBase):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.current_art_path = os.path.join(self.cache_dir, "current_art.png")
         
+        # Ensure any leftover cached art from prior sessions/buggy decodes is wiped
+        self.cleanup_cache()
+        
+        # Force reload divoom_api to ensure any long-running daemon (PixooHub) uses the latest version on disk
+        import importlib
+        for mod_name in list(sys.modules.keys()):
+            if "divoom_api" in mod_name and sys.modules[mod_name] is not None:
+                try:
+                    importlib.reload(sys.modules[mod_name])
+                except Exception as e:
+                    logger.warning(f"Could not reload {mod_name}: {e}")
+        
         try:
             from .divoom_api import DivoomGalleryAPI
         except ImportError:
