@@ -1,8 +1,15 @@
 import os
+import sys
 import time
 import logging
 import urllib.request
 from io import BytesIO
+
+# Ensure current plugin directory is in sys.path so sibling modules like divoom_api can be imported
+plugin_dir = os.path.dirname(os.path.abspath(__file__))
+if plugin_dir not in sys.path:
+    sys.path.insert(0, plugin_dir)
+
 
 try:
     from PIL import Image
@@ -42,7 +49,10 @@ class SteamPlugin(PixooPluginBase):
         os.makedirs(self.cache_dir, exist_ok=True)
         self.current_art_path = os.path.join(self.cache_dir, "current_art.png")
         
-        from divoom_api import DivoomGalleryAPI
+        try:
+            from .divoom_api import DivoomGalleryAPI
+        except ImportError:
+            from divoom_api import DivoomGalleryAPI
         self.divoom_api = DivoomGalleryAPI(config=self.config)
         
         self.pixoo = self.get_pixoo_instance()

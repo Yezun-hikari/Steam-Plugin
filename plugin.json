@@ -1,7 +1,7 @@
 {
     "name": "Steam Pixel Art",
     "description": "Displays pixel art from the Divoom Gallery API for your currently played Steam game.",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "author": "Tim",
     "entry": "plugin.py",
     "settings_schema": [

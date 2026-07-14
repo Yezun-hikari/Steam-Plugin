@@ -3,7 +3,16 @@ import os
 import sys
 import argparse
 import urllib.request
-from divoom_api import DivoomGalleryAPI
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+try:
+    from .divoom_api import DivoomGalleryAPI
+except ImportError:
+    from divoom_api import DivoomGalleryAPI
+
 
 def main():
     parser = argparse.ArgumentParser(description="Download Divoom Gallery artwork for a specific game using intelligent keyword search.")
